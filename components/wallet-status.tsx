@@ -56,9 +56,6 @@ export function WalletStatus() {
   }, []);
 
   useEffect(() => {
-    checkWalletStatus();
-    
-    // Poll for wallet status changes every 3 seconds
     const interval = setInterval(checkWalletStatus, 3000);
     
     return () => clearInterval(interval);
