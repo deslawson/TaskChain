@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { isConnected, requestAccess, getAddress } from '@stellar/freighter-api'
+import { isConnected, requestAccess, getAddress, signMessage } from '@stellar/freighter-api'
 import { Button } from '@/components/ui/button'
 import { Wallet, LogOut, AlertCircle, Loader2, ArrowLeft, FlaskConical } from 'lucide-react'
 import Link from 'next/link'
@@ -14,6 +14,7 @@ export default function LoginPage() {
   const [address, setAddress] = useState<string | null>(null)
   const [isInitializing, setIsInitializing] = useState(true)
   const [isConnecting, setIsConnecting] = useState(false)
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [isMocking, setIsMocking] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -26,10 +27,17 @@ export default function LoginPage() {
           // Verify if still connected
           const connectedResponse = await isConnected()
           if (connectedResponse.isConnected) {
-            setAddress(savedAddress)
-          } else {
-            localStorage.removeItem('stellar_wallet_address')
+            // Also check if backend session is still active
+            const meRes = await fetch('/api/auth/me')
+            if (meRes.ok) {
+              setAddress(savedAddress)
+              router.push('/dashboard')
+              return
+            }
           }
+          // Clear if not fully verified
+          localStorage.removeItem('stellar_wallet_address')
+          localStorage.removeItem('tc_dev_access_token')
         }
       } catch (err) {
         console.error('Failed to initialize wallet session:', err)
@@ -40,11 +48,12 @@ export default function LoginPage() {
 
     // Slight delay to ensure Freighter extension is loaded
     setTimeout(initSession, 500)
-  }, [])
+  }, [router])
 
   const handleConnect = async () => {
     setError(null)
     setIsConnecting(true)
+    setStatusMessage('Connecting wallet...')
     try {
       // Check if Freighter is installed
       const connectedResponse = await isConnected()
@@ -69,17 +78,73 @@ export default function LoginPage() {
         walletAddress = addressResponse.address
       }
 
-      if (walletAddress) {
-        setAddress(walletAddress)
-        localStorage.setItem('stellar_wallet_address', walletAddress)
-      } else {
+      if (!walletAddress) {
         throw new Error('Failed to retrieve wallet address from Freighter.')
       }
+
+      // 1. Fetch Nonce & Message
+      setStatusMessage('Requesting authentication message...')
+      const nonceRes = await fetch('/api/auth/nonce', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress }),
+      })
+      const nonceData = await nonceRes.json()
+      if (!nonceRes.ok) {
+        throw new Error(nonceData?.error || 'Failed to generate authentication nonce.')
+      }
+
+      const { nonce, message } = nonceData
+
+      // 2. Request signature via Freighter signMessage
+      setStatusMessage('Approve signature request...')
+      const signResponse = await signMessage(message)
+      
+      let signature: string | undefined
+      if (typeof signResponse === 'string') {
+        signature = signResponse
+      } else if (signResponse && typeof signResponse === 'object') {
+        if (signResponse.error) {
+          throw new Error(signResponse.error.message || signResponse.error || 'Message signing was rejected.')
+        }
+        signature = signResponse.signedMessage
+      }
+
+      if (!signature) {
+        throw new Error('Message signing was cancelled or failed.')
+      }
+
+      // 3. Verify Signature & Nonce on Backend
+      setStatusMessage('Verifying signature...')
+      const verifyRes = await fetch('/api/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          walletAddress,
+          nonce,
+          signature,
+          message,
+        }),
+      })
+
+      const verifyData = await verifyRes.json()
+      if (!verifyRes.ok) {
+        throw new Error(verifyData?.error || 'Signature verification failed.')
+      }
+
+      // 4. Set local storage & redirect
+      setAddress(walletAddress)
+      localStorage.setItem('stellar_wallet_address', walletAddress)
+      if (verifyData.accessToken) {
+        localStorage.setItem('tc_dev_access_token', verifyData.accessToken)
+      }
+      router.push('/dashboard')
     } catch (err: any) {
       console.error('Connection error:', err)
       setError(err?.message || 'Unable to connect wallet. Please try again.')
     } finally {
       setIsConnecting(false)
+      setStatusMessage(null)
     }
   }
 
@@ -108,6 +173,7 @@ export default function LoginPage() {
   const handleDisconnect = () => {
     setAddress(null)
     localStorage.removeItem('stellar_wallet_address')
+    localStorage.removeItem('tc_dev_access_token')
     setError(null)
   }
 
@@ -185,7 +251,7 @@ export default function LoginPage() {
                 {isConnecting ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Connecting...
+                    {statusMessage || 'Connecting...'}
                   </>
                 ) : (
                   'Connect Freighter'

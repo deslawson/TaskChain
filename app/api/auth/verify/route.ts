@@ -84,6 +84,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const response = NextResponse.json(
       {
         walletAddress: normalizedWallet,
+        accessToken: session.accessToken,
         accessTokenExpiresAt: session.accessTokenExpiresAt.toISOString(),
         refreshTokenExpiresAt: session.refreshTokenExpiresAt.toISOString(),
       },
