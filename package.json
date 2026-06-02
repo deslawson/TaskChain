@@ -81,7 +81,7 @@
     "eslint": "^9.39.3",
     "eslint-config-next": "^16.1.6",
     "@testing-library/jest-dom": "^6.0.0",
-    "@testing-library/react": "^14.0.0",
+    "@testing-library/react": "^16.0.0",
     "jsdom": "^23.0.0",
     "ts-node": "^10.9.1",
     "vite-tsconfig-paths": "^6.1.1",
