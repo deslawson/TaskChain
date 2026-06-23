@@ -81,6 +81,9 @@ export function Navbar() {
 
           {/* Desktop Navigation Links */}
           <div className="hidden md:flex items-center gap-8">
+            <Link href="/freelancers" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+              Browse Freelancers
+            </Link>
             <Link href="#features" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
               Features
             </Link>
@@ -213,6 +216,9 @@ export function Navbar() {
       {mobileMenuOpen && (
         <div className="md:hidden border-t border-border/40 bg-background/95 backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-200">
           <div className="px-4 py-6 space-y-4">
+            <Link href="/freelancers" className="block text-sm text-muted-foreground hover:text-foreground transition-colors" onClick={closeMenus}>
+              Browse Freelancers
+            </Link>
             <Link href="#features" className="block text-sm text-muted-foreground hover:text-foreground transition-colors" onClick={closeMenus}>
               Features
             </Link>
