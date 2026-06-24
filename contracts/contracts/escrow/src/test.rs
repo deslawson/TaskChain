@@ -63,6 +63,8 @@ fn test_happy_path() {
         amount: 100,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone 1"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestone_2 = Milestone {
         id: 2,
@@ -70,6 +72,8 @@ fn test_happy_path() {
         amount: 200,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone 2"),
+        client_approved: false,
+        freelancer_approved: false,
     };
 
     let milestones = vec![&env, milestone_1, milestone_2];
@@ -134,6 +138,8 @@ fn test_voluntary_refund() {
         amount: 250,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Project Work"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -165,6 +171,8 @@ fn test_dispute_and_resolve_to_freelancer() {
         amount: 400,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "High Value Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -199,6 +207,8 @@ fn test_dispute_and_resolve_to_client() {
         amount: 400,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "High Value Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -233,6 +243,8 @@ fn test_double_initialization_fails() {
         amount: 100,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -254,6 +266,8 @@ fn test_zero_amount_fails() {
         amount: 0, // Zero amount
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Invalid Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -273,6 +287,8 @@ fn test_unauthorized_release_fails() {
         amount: 100,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -299,6 +315,8 @@ fn test_version() {
         amount: 100,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -320,6 +338,8 @@ fn test_release_without_both_approvals_fails() {
         amount: 100,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -344,6 +364,8 @@ fn test_double_client_approval_fails() {
         amount: 100,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -368,6 +390,8 @@ fn test_double_freelancer_confirmation_fails() {
         amount: 100,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 
@@ -392,6 +416,8 @@ fn test_dispute_clears_approvals() {
         amount: 400,
         status: MilestoneStatus::Pending,
         description: String::from_str(&env, "High Value Milestone"),
+        client_approved: false,
+        freelancer_approved: false,
     };
     let milestones = vec![&env, milestone];
 

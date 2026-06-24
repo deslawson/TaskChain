@@ -1,19 +1,19 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, token, Address, Env, String, Vec,
+    contract, contractimpl, contracttype, contracterror, token, Address, Env, String, Vec, symbol_short,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
 pub enum MilestoneStatus {
-    Pending = 0,     // Created but not yet funded
-    Funded = 1,      // Contract funded, ready for work
-    Submitted = 2,   // Work completed and submitted by freelancer
-    Approved = 3,    // Approved by client, ready for release
-    Released = 4,    // Funds successfully transferred to freelancer
-    Refunded = 5,    // Funds returned to client
+    Pending = 0,
+    Funded = 1,
+    Submitted = 2,
+    Approved = 3,
+    Released = 4,
+    Refunded = 5,
     Disputed = 6,
-    AutoExpired = 7,    // Under dispute, waiting for arbiter resolution
+    AutoExpired = 7,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub struct Milestone {
     pub amount: i128,
     pub status: MilestoneStatus,
     pub description: String,
+    pub client_approved: bool,
+    pub freelancer_approved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,13 +35,11 @@ pub enum DataKey {
     Freelancer,
     Arbiter,
     Token,
-    Milestones,
     IsFunded,
     Admin,
     Version,
-    ClientApproval(u32),
-    FreelancerApproval(u32),
-    MilestoneDeadline(u32),
+    Milestone(u32),
+    MilestoneIds,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +64,6 @@ pub struct EscrowContract;
 
 #[contractimpl]
 impl EscrowContract {
-    /// Initialize the escrow agreement with participant addresses, the payment token, and the milestones.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -82,12 +81,16 @@ impl EscrowContract {
             return Err(Error::MilestoneNotFound);
         }
 
-        // Validate all milestone amounts are greater than zero
+        let mut ids = Vec::new(&env);
         for i in 0..milestones.len() {
-            let milestone = milestones.get(i).unwrap();
+            let mut milestone = milestones.get(i).unwrap();
             if milestone.amount <= 0 {
                 return Err(Error::ZeroAmount);
             }
+            milestone.client_approved = false;
+            milestone.freelancer_approved = false;
+            env.storage().instance().set(&DataKey::Milestone(milestone.id), &milestone);
+            ids.push_back(milestone.id);
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -96,21 +99,14 @@ impl EscrowContract {
         env.storage().instance().set(&DataKey::Freelancer, &freelancer);
         env.storage().instance().set(&DataKey::Arbiter, &arbiter);
         env.storage().instance().set(&DataKey::Token, &token);
-        env.storage().instance().set(&DataKey::Milestones, &milestones);
-
-        // Store milestone deadlines for time-based validation
-        for i in 0..milestones.len() {
-            let m = milestones.get(i).unwrap();
-            if m.deadline > 0 {
-                env.storage().instance().set(&DataKey::MilestoneDeadline(m.id), &m.deadline);
-            }
-        }
+        env.storage().instance().set(&DataKey::MilestoneIds, &ids);
         env.storage().instance().set(&DataKey::IsFunded, &false);
+
+        env.events().publish((symbol_short!("init"),), (client, freelancer, arbiter));
 
         Ok(())
     }
 
-    /// The client locks the total funds for all milestones into the contract.
     pub fn fund(env: Env) -> Result<(), Error> {
         let client: Address = env.storage().instance().get(&DataKey::Client).ok_or(Error::NotInitialized)?;
         client.require_auth();
@@ -120,11 +116,12 @@ impl EscrowContract {
             return Err(Error::AlreadyFunded);
         }
 
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
+        let ids: Vec<u32> = env.storage().instance().get(&DataKey::MilestoneIds).ok_or(Error::NotInitialized)?;
         let mut total_amount: i128 = 0;
 
-        for i in 0..milestones.len() {
-            let milestone = milestones.get(i).unwrap();
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            let milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(id)).ok_or(Error::MilestoneNotFound)?;
             total_amount += milestone.amount;
         }
 
@@ -132,131 +129,90 @@ impl EscrowContract {
             return Err(Error::ZeroAmount);
         }
 
-        // Transfer payment tokens from the client to this contract
         let token_address: Address = env.storage().instance().get(&DataKey::Token).ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &token_address);
         token_client.transfer(&client, &env.current_contract_address(), &total_amount);
 
-        // Update milestones to Funded status
-        let mut updated_milestones = Vec::new(&env);
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(id)).ok_or(Error::MilestoneNotFound)?;
             if milestone.status == MilestoneStatus::Pending {
                 milestone.status = MilestoneStatus::Funded;
             }
-            updated_milestones.push_back(milestone);
+            env.storage().instance().set(&DataKey::Milestone(id), &milestone);
         }
 
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
         env.storage().instance().set(&DataKey::IsFunded, &true);
+
+        env.events().publish((symbol_short!("fund"),), (total_amount,));
 
         Ok(())
     }
 
-    /// Freelancer submits milestone progress for client review.
     pub fn submit_milestone(env: Env, milestone_id: u32) -> Result<(), Error> {
         let freelancer: Address = env.storage().instance().get(&DataKey::Freelancer).ok_or(Error::NotInitialized)?;
         freelancer.require_auth();
 
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
-        let mut updated_milestones = Vec::new(&env);
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
 
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-                if milestone.status != MilestoneStatus::Funded {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                if milestone.deadline > 0 && env.ledger().timestamp() > milestone.deadline {
-                        return Err(Error::DeadlineExceeded);
-                    }
-                    milestone.status = MilestoneStatus::Submitted;
-            }
-            updated_milestones.push_back(milestone);
+        if milestone.status != MilestoneStatus::Funded {
+            return Err(Error::InvalidMilestoneStatus);
+        }
+        if milestone.deadline > 0 && env.ledger().timestamp() > milestone.deadline {
+            return Err(Error::DeadlineExceeded);
         }
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
-        }
+        milestone.status = MilestoneStatus::Submitted;
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
 
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
+        env.events().publish((symbol_short!("submit"),), (milestone_id,));
+
         Ok(())
     }
 
-    /// Client approves milestone completion.
     pub fn approve(env: Env, milestone_id: u32) -> Result<(), Error> {
         let client: Address = env.storage().instance().get(&DataKey::Client).ok_or(Error::NotInitialized)?;
         client.require_auth();
 
-        // Check if already approved by client
-        let approval_key = DataKey::ClientApproval(milestone_id);
-        if env.storage().instance().has(&approval_key) {
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
+
+        if milestone.status != MilestoneStatus::Submitted {
+            return Err(Error::InvalidMilestoneStatus);
+        }
+        if milestone.client_approved {
             return Err(Error::AlreadyApproved);
         }
 
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
-        let mut updated_milestones = Vec::new(&env);
+        milestone.client_approved = true;
+        milestone.status = MilestoneStatus::Approved;
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
 
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-                if milestone.status != MilestoneStatus::Submitted {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                // Set client approval
-                env.storage().instance().set(&approval_key, &true);
-                milestone.status = MilestoneStatus::Approved;
-            }
-            updated_milestones.push_back(milestone);
-        }
+        env.events().publish((symbol_short!("approve"),), (milestone_id,));
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
-        }
-
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
         Ok(())
     }
 
-    /// Freelancer confirms milestone completion (second signature for multi-sig release).
     pub fn freelancer_confirm(env: Env, milestone_id: u32) -> Result<(), Error> {
         let freelancer: Address = env.storage().instance().get(&DataKey::Freelancer).ok_or(Error::NotInitialized)?;
         freelancer.require_auth();
 
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
 
-        for i in 0..milestones.len() {
-            let milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-                if milestone.status != MilestoneStatus::Approved {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                // Check if already confirmed by freelancer
-                let approval_key = DataKey::FreelancerApproval(milestone_id);
-                if env.storage().instance().has(&approval_key) {
-                    return Err(Error::AlreadyApproved);
-                }
-                // Set freelancer confirmation
-                env.storage().instance().set(&approval_key, &true);
-            }
+        if milestone.status != MilestoneStatus::Approved {
+            return Err(Error::InvalidMilestoneStatus);
+        }
+        if milestone.freelancer_approved {
+            return Err(Error::AlreadyApproved);
         }
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
-        }
+        milestone.freelancer_approved = true;
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
+
+        env.events().publish((symbol_short!("confirm"),), (milestone_id,));
 
         Ok(())
     }
 
-    /// Transfers funds of an approved milestone to the freelancer.
-    /// Requires multi-signature: both client and freelancer must have approved.
-    /// Can be triggered by either client or freelancer after both approvals.
     pub fn release(env: Env, milestone_id: u32, caller: Address) -> Result<(), Error> {
         caller.require_auth();
 
@@ -267,49 +223,28 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
 
-        // Check multi-signature requirement: both client and freelancer must have approved
-        let client_approval_key = DataKey::ClientApproval(milestone_id);
-        let freelancer_approval_key = DataKey::FreelancerApproval(milestone_id);
-        
-        let client_approved: bool = env.storage().instance().get(&client_approval_key).unwrap_or(false);
-        let freelancer_approved: bool = env.storage().instance().get(&freelancer_approval_key).unwrap_or(false);
-        
-        if !client_approved || !freelancer_approved {
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
+
+        if !milestone.client_approved || !milestone.freelancer_approved {
             return Err(Error::InsufficientApprovals);
         }
-
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
-        let mut transfer_amount: i128 = 0;
-        let mut updated_milestones = Vec::new(&env);
-
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-                if milestone.status != MilestoneStatus::Approved {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                transfer_amount = milestone.amount;
-                milestone.status = MilestoneStatus::Released;
-            }
-            updated_milestones.push_back(milestone);
+        if milestone.status != MilestoneStatus::Approved {
+            return Err(Error::InvalidMilestoneStatus);
         }
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
-        }
+        let transfer_amount = milestone.amount;
+        milestone.status = MilestoneStatus::Released;
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
 
-        // Payout to freelancer
         let token_address: Address = env.storage().instance().get(&DataKey::Token).ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &token_address);
         token_client.transfer(&env.current_contract_address(), &freelancer, &transfer_amount);
 
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
+        env.events().publish((symbol_short!("release"),), (milestone_id, transfer_amount));
+
         Ok(())
     }
 
-    /// Freelancer voluntarily refunds locked funds back to the client.
     pub fn refund(env: Env, milestone_id: u32, caller: Address) -> Result<(), Error> {
         caller.require_auth();
 
@@ -318,42 +253,26 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
 
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
-        let mut transfer_amount: i128 = 0;
-        let mut updated_milestones = Vec::new(&env);
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
 
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-                // Only non-released and funded milestones can be refunded
-                if milestone.status != MilestoneStatus::Funded && milestone.status != MilestoneStatus::Submitted {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                transfer_amount = milestone.amount;
-                milestone.status = MilestoneStatus::Refunded;
-            }
-            updated_milestones.push_back(milestone);
+        if milestone.status != MilestoneStatus::Funded && milestone.status != MilestoneStatus::Submitted {
+            return Err(Error::InvalidMilestoneStatus);
         }
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
-        }
+        let transfer_amount = milestone.amount;
+        milestone.status = MilestoneStatus::Refunded;
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
 
-        // Refund client
         let client: Address = env.storage().instance().get(&DataKey::Client).ok_or(Error::NotInitialized)?;
         let token_address: Address = env.storage().instance().get(&DataKey::Token).ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &token_address);
         token_client.transfer(&env.current_contract_address(), &client, &transfer_amount);
 
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
+        env.events().publish((symbol_short!("refund"),), (milestone_id, transfer_amount));
+
         Ok(())
     }
 
-    /// Puts a milestone into dispute, halting regular flow and delegating resolution to the arbiter.
-    /// Can be raised by client or freelancer.
-    /// Clears any existing approvals when dispute is raised.
     pub fn dispute(env: Env, milestone_id: u32, caller: Address) -> Result<(), Error> {
         caller.require_auth();
 
@@ -364,63 +283,42 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
 
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
-        let mut updated_milestones = Vec::new(&env);
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
 
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-                if milestone.status != MilestoneStatus::Funded && milestone.status != MilestoneStatus::Submitted && milestone.status != MilestoneStatus::Approved {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                milestone.status = MilestoneStatus::Disputed;
-                // Clear approvals when dispute is raised
-                env.storage().instance().remove(&DataKey::ClientApproval(milestone_id));
-                env.storage().instance().remove(&DataKey::FreelancerApproval(milestone_id));
-            }
-            updated_milestones.push_back(milestone);
+        if milestone.status != MilestoneStatus::Funded
+            && milestone.status != MilestoneStatus::Submitted
+            && milestone.status != MilestoneStatus::Approved
+        {
+            return Err(Error::InvalidMilestoneStatus);
         }
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
-        }
+        milestone.status = MilestoneStatus::Disputed;
+        milestone.client_approved = false;
+        milestone.freelancer_approved = false;
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
 
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
+        env.events().publish((symbol_short!("dispute"),), (milestone_id,));
+
         Ok(())
     }
 
-    /// Arbiter resolves a dispute by deciding whether to payout freelancer or refund client.
     pub fn resolve_dispute(env: Env, milestone_id: u32, release_to_freelancer: bool) -> Result<(), Error> {
         let arbiter: Address = env.storage().instance().get(&DataKey::Arbiter).ok_or(Error::NotInitialized)?;
         arbiter.require_auth();
 
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
-        let mut transfer_amount: i128 = 0;
-        let mut updated_milestones = Vec::new(&env);
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
 
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-                if milestone.status != MilestoneStatus::Disputed {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                transfer_amount = milestone.amount;
-                milestone.status = if release_to_freelancer {
-                    MilestoneStatus::Released
-                } else {
-                    MilestoneStatus::Refunded
-                };
-            }
-            updated_milestones.push_back(milestone);
+        if milestone.status != MilestoneStatus::Disputed {
+            return Err(Error::InvalidMilestoneStatus);
         }
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
-        }
+        let transfer_amount = milestone.amount;
+        milestone.status = if release_to_freelancer {
+            MilestoneStatus::Released
+        } else {
+            MilestoneStatus::Refunded
+        };
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
 
         let recipient: Address = if release_to_freelancer {
             env.storage().instance().get(&DataKey::Freelancer).ok_or(Error::NotInitialized)?
@@ -428,80 +326,72 @@ impl EscrowContract {
             env.storage().instance().get(&DataKey::Client).ok_or(Error::NotInitialized)?
         };
 
-        // Transfer funds
         let token_address: Address = env.storage().instance().get(&DataKey::Token).ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &token_address);
         token_client.transfer(&env.current_contract_address(), &recipient, &transfer_amount);
 
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
+        env.events().publish((symbol_short!("resolve"),), (milestone_id, release_to_freelancer));
+
         Ok(())
     }
 
-    
-    /// Auto-expire a milestone that has exceeded its deadline without being completed.
-    /// Refunds the milestone amount back to the client.
-    /// Can be called by anyone once the deadline has passed.
     pub fn auto_expire(env: Env, milestone_id: u32) -> Result<(), Error> {
-        let milestones: Vec<Milestone> = env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)?;
-        let mut found = false;
-        let mut transfer_amount: i128 = 0;
-        let mut updated_milestones = Vec::new(&env);
+        let mut milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
 
-        for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap();
-            if milestone.id == milestone_id {
-                found = true;
-
-                // Check deadline exists and has passed
-                if milestone.deadline == 0 {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-                if env.ledger().timestamp() <= milestone.deadline {
-                    return Err(Error::InvalidMilestoneStatus);
-                }
-
-                // Only expire if not yet released, refunded, or disputed
-                if milestone.status == MilestoneStatus::Released ||
-                   milestone.status == MilestoneStatus::Refunded ||
-                   milestone.status == MilestoneStatus::Disputed ||
-                   milestone.status == MilestoneStatus::AutoExpired {
-                    return Err(Error::AlreadyExpired);
-                }
-
-                transfer_amount = milestone.amount;
-                milestone.status = MilestoneStatus::AutoExpired;
-            }
-            updated_milestones.push_back(milestone);
+        if milestone.deadline == 0 {
+            return Err(Error::InvalidMilestoneStatus);
+        }
+        if env.ledger().timestamp() <= milestone.deadline {
+            return Err(Error::InvalidMilestoneStatus);
         }
 
-        if !found {
-            return Err(Error::MilestoneNotFound);
+        if milestone.status == MilestoneStatus::Released
+            || milestone.status == MilestoneStatus::Refunded
+            || milestone.status == MilestoneStatus::Disputed
+            || milestone.status == MilestoneStatus::AutoExpired
+        {
+            return Err(Error::AlreadyExpired);
         }
 
-        // Refund the expired milestone amount to the client
+        let transfer_amount = milestone.amount;
+        milestone.status = MilestoneStatus::AutoExpired;
+        env.storage().instance().set(&DataKey::Milestone(milestone_id), &milestone);
+
         let client: Address = env.storage().instance().get(&DataKey::Client).ok_or(Error::NotInitialized)?;
         let token_address: Address = env.storage().instance().get(&DataKey::Token).ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &token_address);
         token_client.transfer(&env.current_contract_address(), &client, &transfer_amount);
 
-        env.storage().instance().set(&DataKey::Milestones, &updated_milestones);
+        env.events().publish((symbol_short!("expire"),), (milestone_id, transfer_amount));
+
         Ok(())
     }
 
-    /// Check if a milestone has passed its deadline.
     pub fn is_milestone_expired(env: Env, milestone_id: u32) -> Result<bool, Error> {
-        let deadline: u64 = env.storage().instance().get(&DataKey::MilestoneDeadline(milestone_id)).unwrap_or(0);
-        if deadline == 0 {
+        let milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
+        if milestone.deadline == 0 {
             return Ok(false);
         }
-        Ok(env.ledger().timestamp() > deadline)
+        Ok(env.ledger().timestamp() > milestone.deadline)
     }
 
-    /// Get the deadline for a specific milestone.
     pub fn get_milestone_deadline(env: Env, milestone_id: u32) -> Result<u64, Error> {
-        env.storage().instance().get(&DataKey::MilestoneDeadline(milestone_id)).ok_or(Error::MilestoneNotFound)
+        let milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(milestone_id)).ok_or(Error::MilestoneNotFound)?;
+        Ok(milestone.deadline)
     }
+
     // --- State Getters ---
+
+    pub fn get_milestones(env: Env) -> Result<Vec<Milestone>, Error> {
+        let ids: Vec<u32> = env.storage().instance().get(&DataKey::MilestoneIds).ok_or(Error::NotInitialized)?;
+        let mut milestones = Vec::new(&env);
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            let milestone: Milestone = env.storage().instance().get(&DataKey::Milestone(id)).ok_or(Error::MilestoneNotFound)?;
+            milestones.push_back(milestone);
+        }
+        Ok(milestones)
+    }
 
     pub fn get_client(env: Env) -> Result<Address, Error> {
         env.storage().instance().get(&DataKey::Client).ok_or(Error::NotInitialized)
@@ -519,36 +409,31 @@ impl EscrowContract {
         env.storage().instance().get(&DataKey::Token).ok_or(Error::NotInitialized)
     }
 
-    pub fn get_milestones(env: Env) -> Result<Vec<Milestone>, Error> {
-        env.storage().instance().get(&DataKey::Milestones).ok_or(Error::NotInitialized)
-    }
-
     pub fn is_funded(env: Env) -> bool {
         env.storage().instance().get(&DataKey::IsFunded).unwrap_or(false)
     }
 
-    /// Upgrades the contract to a new WASM executable
     pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), Error> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)?;
         admin.require_auth();
-
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
-    /// Returns the current version of the contract
     pub fn version(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
-    /// Check if client has approved a specific milestone
     pub fn has_client_approval(env: Env, milestone_id: u32) -> bool {
-        env.storage().instance().get(&DataKey::ClientApproval(milestone_id)).unwrap_or(false)
+        env.storage().instance().get::<DataKey, Milestone>(&DataKey::Milestone(milestone_id))
+            .map(|m| m.client_approved)
+            .unwrap_or(false)
     }
 
-    /// Check if freelancer has approved a specific milestone
     pub fn has_freelancer_approval(env: Env, milestone_id: u32) -> bool {
-        env.storage().instance().get(&DataKey::FreelancerApproval(milestone_id)).unwrap_or(false)
+        env.storage().instance().get::<DataKey, Milestone>(&DataKey::Milestone(milestone_id))
+            .map(|m| m.freelancer_approved)
+            .unwrap_or(false)
     }
 }
 
