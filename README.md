@@ -159,6 +159,11 @@ Future work may introduce an alternative CI/CD pipeline (e.g., a different provi
 
 ---
 
+## Soroban Escrow Deployment
+
+See the Soroban escrow deployment guide for build and deploy steps, example CLI calls, and integration notes: [docs/soroban-escrow-deployment.md](docs/soroban-escrow-deployment.md)
+
+
 ## 📄 License
 
 This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
